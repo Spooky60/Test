@@ -34,46 +34,48 @@ const RSS_FEEDS = [
   },
 ];
 
-// Decode raw RSS buffer to string with proper encoding detection
+// Check if a string contains Hebrew characters (U+0590 - U+05FF)
+function containsHebrew(str) {
+  let count = 0;
+  for (let i = 0; i < Math.min(str.length, 2000); i++) {
+    const code = str.charCodeAt(i);
+    if (code >= 0x0590 && code <= 0x05ff) count++;
+  }
+  return count;
+}
+
+// Decode raw RSS buffer to string, trying multiple encodings and
+// picking whichever produces the most valid Hebrew characters.
 function decodeRSSBuffer(buf, headers) {
-  const contentType = (headers && headers["content-type"]) || "";
-  const rawPreview = buf.toString("ascii", 0, Math.min(buf.length, 300));
+  // Try all candidate encodings
+  const candidates = ["utf-8", "windows-1255", "iso-8859-8"];
+  const results = [];
 
-  let encoding = "utf-8";
-
-  // Check Content-Type header for charset
-  const charsetMatch = contentType.match(/charset=([^\s;]+)/i);
-  if (charsetMatch) {
-    encoding = charsetMatch[1].toLowerCase().replace(/^"/, "").replace(/"$/, "");
-  }
-
-  // Check XML declaration for encoding (takes priority)
-  const xmlEncodingMatch = rawPreview.match(/encoding=["']([^"']+)["']/i);
-  if (xmlEncodingMatch) {
-    encoding = xmlEncodingMatch[1].toLowerCase();
-  }
-
-  console.log(`Detected encoding: ${encoding}`);
-
-  let data;
-  try {
-    data = iconv.decode(buf, encoding);
-  } catch {
+  for (const enc of candidates) {
     try {
-      data = iconv.decode(buf, "windows-1255");
+      const decoded = iconv.decode(buf, enc);
+      const hebrewCount = containsHebrew(decoded);
+      results.push({ encoding: enc, data: decoded, hebrewCount });
+      console.log(`  Encoding ${enc}: ${hebrewCount} Hebrew chars found`);
     } catch {
-      data = buf.toString("utf-8");
+      // skip unsupported encoding
     }
   }
+
+  // Pick the encoding that produced the most Hebrew characters
+  results.sort((a, b) => b.hebrewCount - a.hebrewCount);
+
+  let data = results.length > 0 ? results[0].data : buf.toString("utf-8");
+  const chosen = results.length > 0 ? results[0].encoding : "utf-8 (fallback)";
+  console.log(`  -> Chose encoding: ${chosen}`);
 
   // Strip BOM if present
   if (data.charCodeAt(0) === 0xfeff) {
     data = data.slice(1);
   }
 
-  // CRITICAL: After decoding, the string is now UTF-16 internally.
-  // We must fix the XML declaration so xml2js doesn't try to re-decode
-  // from the original encoding (e.g. windows-1255), which would corrupt Hebrew.
+  // Remove or fix the XML encoding declaration so xml2js doesn't
+  // try to re-decode the already-decoded string
   data = data.replace(
     /(<\?xml[^?]*?)encoding=["'][^"']*["']/i,
     '$1encoding="UTF-8"'

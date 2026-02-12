@@ -48,12 +48,38 @@ async function fetchRSSDirect(feedUrl) {
     },
   });
 
-  // Ynet RSS is typically windows-1255 encoded
+  // Detect encoding from Content-Type header or XML declaration
+  const buf = Buffer.from(response.data);
+  const contentType = response.headers["content-type"] || "";
+  const rawPreview = buf.toString("ascii", 0, Math.min(buf.length, 200));
+
+  let encoding = "utf-8";
+  // Check Content-Type header for charset
+  const charsetMatch = contentType.match(/charset=([^\s;]+)/i);
+  if (charsetMatch) {
+    encoding = charsetMatch[1].toLowerCase();
+  }
+  // Check XML declaration for encoding
+  const xmlEncodingMatch = rawPreview.match(/encoding=["']([^"']+)["']/i);
+  if (xmlEncodingMatch) {
+    encoding = xmlEncodingMatch[1].toLowerCase();
+  }
+
   let data;
   try {
-    data = iconv.decode(Buffer.from(response.data), "windows-1255");
+    data = iconv.decode(buf, encoding);
   } catch {
-    data = response.data.toString("utf-8");
+    // If detected encoding fails, try common Hebrew encodings
+    try {
+      data = iconv.decode(buf, "windows-1255");
+    } catch {
+      data = buf.toString("utf-8");
+    }
+  }
+
+  // Strip BOM if present
+  if (data.charCodeAt(0) === 0xfeff) {
+    data = data.slice(1);
   }
 
   const parser = new xml2js.Parser({ explicitArray: false });
@@ -109,6 +135,7 @@ async function fetchRSS(feedUrl) {
 
 // API endpoint to get news
 app.get("/api/news", async (req, res) => {
+  res.set("Content-Type", "application/json; charset=utf-8");
   try {
     const feedPromises = RSS_FEEDS.map(async (feed) => {
       const items = await fetchRSS(feed.url);

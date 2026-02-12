@@ -71,6 +71,14 @@ function decodeRSSBuffer(buf, headers) {
     data = data.slice(1);
   }
 
+  // CRITICAL: After decoding, the string is now UTF-16 internally.
+  // We must fix the XML declaration so xml2js doesn't try to re-decode
+  // from the original encoding (e.g. windows-1255), which would corrupt Hebrew.
+  data = data.replace(
+    /(<\?xml[^?]*?)encoding=["'][^"']*["']/i,
+    '$1encoding="UTF-8"'
+  );
+
   return data;
 }
 

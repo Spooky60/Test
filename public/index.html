@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>סיכום חדשות היום - Ynet</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: "Segoe UI", Tahoma, Arial, sans-serif;
+      background: #f0f2f5;
+      color: #1a1a2e;
+      direction: rtl;
+      min-height: 100vh;
+    }
+
+    header {
+      background: linear-gradient(135deg, #e63946, #c1121f);
+      color: white;
+      padding: 20px 0;
+      text-align: center;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+
+    header h1 {
+      font-size: 2rem;
+      font-weight: 700;
+      margin-bottom: 4px;
+    }
+
+    header .subtitle {
+      font-size: 0.95rem;
+      opacity: 0.9;
+    }
+
+    .refresh-btn {
+      position: absolute;
+      left: 20px;
+      top: 50%;
+      transform: translateY(-50%);
+      background: rgba(255,255,255,0.2);
+      border: 1px solid rgba(255,255,255,0.4);
+      color: white;
+      padding: 8px 16px;
+      border-radius: 20px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      font-family: inherit;
+      transition: background 0.2s;
+    }
+
+    .refresh-btn:hover {
+      background: rgba(255,255,255,0.35);
+    }
+
+    .refresh-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 24px 16px 40px;
+    }
+
+    .timestamp {
+      text-align: center;
+      color: #666;
+      font-size: 0.85rem;
+      margin-bottom: 24px;
+    }
+
+    .error-msg {
+      background: #fff3cd;
+      border: 1px solid #ffc107;
+      border-radius: 8px;
+      padding: 16px;
+      text-align: center;
+      color: #856404;
+      margin-bottom: 24px;
+    }
+
+    .category {
+      margin-bottom: 28px;
+    }
+
+    .category-header {
+      background: #1a1a2e;
+      color: white;
+      padding: 10px 20px;
+      border-radius: 8px 8px 0 0;
+      font-size: 1.15rem;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .category-header .icon {
+      font-size: 1.2rem;
+    }
+
+    .news-list {
+      background: white;
+      border-radius: 0 0 8px 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+      overflow: hidden;
+    }
+
+    .news-item {
+      padding: 14px 20px;
+      border-bottom: 1px solid #eee;
+      transition: background 0.15s;
+    }
+
+    .news-item:last-child {
+      border-bottom: none;
+    }
+
+    .news-item:hover {
+      background: #f8f9fa;
+    }
+
+    .news-item a {
+      text-decoration: none;
+      color: inherit;
+      display: block;
+    }
+
+    .news-title {
+      font-size: 1.05rem;
+      font-weight: 600;
+      color: #1a1a2e;
+      margin-bottom: 4px;
+      line-height: 1.5;
+    }
+
+    .news-title:hover {
+      color: #e63946;
+    }
+
+    .news-desc {
+      font-size: 0.9rem;
+      color: #555;
+      line-height: 1.5;
+    }
+
+    .news-time {
+      font-size: 0.78rem;
+      color: #999;
+      margin-top: 4px;
+    }
+
+    .loading {
+      text-align: center;
+      padding: 60px 20px;
+    }
+
+    .spinner {
+      width: 40px;
+      height: 40px;
+      border: 4px solid #e0e0e0;
+      border-top-color: #e63946;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin: 0 auto 16px;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .loading-text {
+      color: #666;
+      font-size: 1rem;
+    }
+
+    footer {
+      text-align: center;
+      padding: 20px;
+      color: #999;
+      font-size: 0.8rem;
+    }
+
+    @media (max-width: 600px) {
+      header h1 { font-size: 1.5rem; }
+      .refresh-btn {
+        position: static;
+        transform: none;
+        margin-top: 10px;
+      }
+      .container { padding: 16px 10px 30px; }
+      .news-item { padding: 12px 14px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>סיכום חדשות היום</h1>
+    <div class="subtitle">כותרות עדכניות מ-Ynet</div>
+    <button class="refresh-btn" onclick="loadNews()" id="refreshBtn">רענון</button>
+  </header>
+
+  <div class="container">
+    <div id="timestamp" class="timestamp"></div>
+    <div id="content">
+      <div class="loading">
+        <div class="spinner"></div>
+        <div class="loading-text">טוען חדשות...</div>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    סיכום חדשות אוטומטי | מקור: Ynet
+  </footer>
+
+  <script>
+    const CATEGORY_ICONS = {
+      "ראשי": "📰",
+      "חדשות": "🔴",
+      "כלכלה": "💰",
+      "ספורט": "⚽",
+      "בריאות": "🏥",
+    };
+
+    function formatDate(dateStr) {
+      try {
+        const d = new Date(dateStr);
+        if (isNaN(d.getTime())) return "";
+        return d.toLocaleString("he-IL", {
+          day: "numeric",
+          month: "long",
+          hour: "2-digit",
+          minute: "2-digit",
+        });
+      } catch {
+        return "";
+      }
+    }
+
+    function renderNews(data) {
+      const content = document.getElementById("content");
+      const timestamp = document.getElementById("timestamp");
+
+      if (data.fetchedAt) {
+        const d = new Date(data.fetchedAt);
+        timestamp.textContent = "עודכן: " + d.toLocaleString("he-IL", {
+          weekday: "long",
+          day: "numeric",
+          month: "long",
+          year: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        });
+      }
+
+      let html = "";
+
+      if (data.error) {
+        html += `<div class="error-msg">${data.error}</div>`;
+      }
+
+      if (!data.feeds || data.feeds.length === 0) {
+        if (!data.error) {
+          html += `<div class="error-msg">לא נמצאו חדשות להצגה</div>`;
+        }
+        content.innerHTML = html;
+        return;
+      }
+
+      data.feeds.forEach((feed) => {
+        const icon = CATEGORY_ICONS[feed.category] || "📌";
+        html += `
+          <div class="category">
+            <div class="category-header">
+              <span class="icon">${icon}</span>
+              ${feed.category}
+            </div>
+            <div class="news-list">`;
+
+        feed.items.forEach((item) => {
+          const time = formatDate(item.pubDate);
+          html += `
+              <div class="news-item">
+                <a href="${item.link}" target="_blank" rel="noopener noreferrer">
+                  <div class="news-title">${item.title}</div>
+                  ${item.description ? `<div class="news-desc">${item.description}</div>` : ""}
+                  ${time ? `<div class="news-time">${time}</div>` : ""}
+                </a>
+              </div>`;
+        });
+
+        html += `
+            </div>
+          </div>`;
+      });
+
+      content.innerHTML = html;
+    }
+
+    async function loadNews() {
+      const btn = document.getElementById("refreshBtn");
+      const content = document.getElementById("content");
+
+      btn.disabled = true;
+      btn.textContent = "טוען...";
+
+      content.innerHTML = `
+        <div class="loading">
+          <div class="spinner"></div>
+          <div class="loading-text">טוען חדשות...</div>
+        </div>`;
+
+      try {
+        const res = await fetch("/api/news");
+        const data = await res.json();
+        renderNews(data);
+      } catch (err) {
+        content.innerHTML = `<div class="error-msg">שגיאה בטעינת החדשות. נסו לרענן את הדף.</div>`;
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "רענון";
+      }
+    }
+
+    // Load on page load
+    loadNews();
+  </script>
+</body>
+</html>

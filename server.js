@@ -34,42 +34,31 @@ const RSS_FEEDS = [
   },
 ];
 
-// Try fetching RSS directly from Ynet
-async function fetchRSSDirect(feedUrl) {
-  const response = await axios.get(feedUrl, {
-    responseType: "arraybuffer",
-    timeout: 10000,
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      Accept:
-        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      "Accept-Language": "he-IL,he;q=0.9,en;q=0.8",
-    },
-  });
-
-  // Detect encoding from Content-Type header or XML declaration
-  const buf = Buffer.from(response.data);
-  const contentType = response.headers["content-type"] || "";
-  const rawPreview = buf.toString("ascii", 0, Math.min(buf.length, 200));
+// Decode raw RSS buffer to string with proper encoding detection
+function decodeRSSBuffer(buf, headers) {
+  const contentType = (headers && headers["content-type"]) || "";
+  const rawPreview = buf.toString("ascii", 0, Math.min(buf.length, 300));
 
   let encoding = "utf-8";
+
   // Check Content-Type header for charset
   const charsetMatch = contentType.match(/charset=([^\s;]+)/i);
   if (charsetMatch) {
-    encoding = charsetMatch[1].toLowerCase();
+    encoding = charsetMatch[1].toLowerCase().replace(/^"/, "").replace(/"$/, "");
   }
-  // Check XML declaration for encoding
+
+  // Check XML declaration for encoding (takes priority)
   const xmlEncodingMatch = rawPreview.match(/encoding=["']([^"']+)["']/i);
   if (xmlEncodingMatch) {
     encoding = xmlEncodingMatch[1].toLowerCase();
   }
 
+  console.log(`Detected encoding: ${encoding}`);
+
   let data;
   try {
     data = iconv.decode(buf, encoding);
   } catch {
-    // If detected encoding fails, try common Hebrew encodings
     try {
       data = iconv.decode(buf, "windows-1255");
     } catch {
@@ -82,9 +71,11 @@ async function fetchRSSDirect(feedUrl) {
     data = data.slice(1);
   }
 
-  const parser = new xml2js.Parser({ explicitArray: false });
-  const result = await parser.parseStringPromise(data);
+  return data;
+}
 
+// Parse RSS XML string into news items
+function parseRSSItems(result) {
   if (!result?.rss?.channel?.item) {
     return [];
   }
@@ -101,36 +92,82 @@ async function fetchRSSDirect(feedUrl) {
   }));
 }
 
-// Fallback: use rss2json public API as a proxy
-async function fetchRSSViaProxy(feedUrl) {
-  const proxyUrl = `https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent(feedUrl)}`;
-  const response = await axios.get(proxyUrl, { timeout: 10000 });
+// Strategy 1: Fetch RSS directly from Ynet
+async function fetchRSSDirect(feedUrl) {
+  const response = await axios.get(feedUrl, {
+    responseType: "arraybuffer",
+    timeout: 10000,
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      Accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "he-IL,he;q=0.9,en;q=0.8",
+    },
+  });
 
-  if (response.data.status !== "ok" || !response.data.items) {
-    return [];
-  }
+  const buf = Buffer.from(response.data);
+  const data = decodeRSSBuffer(buf, response.headers);
 
-  return response.data.items.map((item) => ({
-    title: item.title || "",
-    description: (item.description || "").replace(/<[^>]*>/g, "").trim(),
-    link: item.link || "",
-    pubDate: item.pubDate || "",
-  }));
+  const parser = new xml2js.Parser({ explicitArray: false });
+  const result = await parser.parseStringPromise(data);
+  return parseRSSItems(result);
 }
 
+// Strategy 2: Use allorigins.win as a raw proxy (preserves original bytes)
+async function fetchRSSViaRawProxy(feedUrl) {
+  const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(feedUrl)}`;
+  const response = await axios.get(proxyUrl, {
+    responseType: "arraybuffer",
+    timeout: 15000,
+  });
+
+  const buf = Buffer.from(response.data);
+  const data = decodeRSSBuffer(buf, response.headers);
+
+  const parser = new xml2js.Parser({ explicitArray: false });
+  const result = await parser.parseStringPromise(data);
+  return parseRSSItems(result);
+}
+
+// Strategy 3: Use corsproxy.io as another raw proxy
+async function fetchRSSViaCorsProxy(feedUrl) {
+  const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(feedUrl)}`;
+  const response = await axios.get(proxyUrl, {
+    responseType: "arraybuffer",
+    timeout: 15000,
+  });
+
+  const buf = Buffer.from(response.data);
+  const data = decodeRSSBuffer(buf, response.headers);
+
+  const parser = new xml2js.Parser({ explicitArray: false });
+  const result = await parser.parseStringPromise(data);
+  return parseRSSItems(result);
+}
+
+// Try all strategies in order
 async function fetchRSS(feedUrl) {
-  // Try direct fetch first, then fallback to proxy
-  try {
-    return await fetchRSSDirect(feedUrl);
-  } catch (directErr) {
-    console.log(`Direct fetch failed for ${feedUrl}: ${directErr.message}, trying proxy...`);
+  const strategies = [
+    { name: "direct", fn: fetchRSSDirect },
+    { name: "allorigins", fn: fetchRSSViaRawProxy },
+    { name: "corsproxy", fn: fetchRSSViaCorsProxy },
+  ];
+
+  for (const strategy of strategies) {
     try {
-      return await fetchRSSViaProxy(feedUrl);
-    } catch (proxyErr) {
-      console.error(`Proxy fetch also failed for ${feedUrl}: ${proxyErr.message}`);
-      return [];
+      const items = await strategy.fn(feedUrl);
+      if (items.length > 0) {
+        console.log(`[${strategy.name}] Success for ${feedUrl}: ${items.length} items`);
+        return items;
+      }
+    } catch (err) {
+      console.log(`[${strategy.name}] Failed for ${feedUrl}: ${err.message}`);
     }
   }
+
+  console.error(`All strategies failed for ${feedUrl}`);
+  return [];
 }
 
 // API endpoint to get news

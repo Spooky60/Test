@@ -45,11 +45,16 @@
       opacity: 0.9;
     }
 
-    .refresh-btn {
-      position: absolute;
-      left: 20px;
-      top: 50%;
-      transform: translateY(-50%);
+    .header-controls {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 12px;
+      margin-top: 12px;
+      flex-wrap: wrap;
+    }
+
+    .header-btn {
       background: rgba(255,255,255,0.2);
       border: 1px solid rgba(255,255,255,0.4);
       color: white;
@@ -61,13 +66,35 @@
       transition: background 0.2s;
     }
 
-    .refresh-btn:hover {
+    .header-btn:hover {
       background: rgba(255,255,255,0.35);
     }
 
-    .refresh-btn:disabled {
+    .header-btn:disabled {
       opacity: 0.5;
       cursor: not-allowed;
+    }
+
+    .encoding-select {
+      background: rgba(255,255,255,0.2);
+      border: 1px solid rgba(255,255,255,0.4);
+      color: white;
+      padding: 8px 12px;
+      border-radius: 20px;
+      font-size: 0.85rem;
+      font-family: inherit;
+      cursor: pointer;
+      direction: ltr;
+    }
+
+    .encoding-select option {
+      background: #1a1a2e;
+      color: white;
+    }
+
+    .encoding-label {
+      font-size: 0.85rem;
+      opacity: 0.9;
     }
 
     .container {
@@ -80,7 +107,14 @@
       text-align: center;
       color: #666;
       font-size: 0.85rem;
-      margin-bottom: 24px;
+      margin-bottom: 8px;
+    }
+
+    .encoding-info {
+      text-align: center;
+      color: #888;
+      font-size: 0.78rem;
+      margin-bottom: 20px;
     }
 
     .error-msg {
@@ -91,6 +125,22 @@
       text-align: center;
       color: #856404;
       margin-bottom: 24px;
+    }
+
+    .debug-panel {
+      background: #1a1a2e;
+      color: #a0ffa0;
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 24px;
+      font-family: monospace;
+      font-size: 0.8rem;
+      direction: ltr;
+      text-align: left;
+      white-space: pre-wrap;
+      word-break: break-all;
+      max-height: 400px;
+      overflow-y: auto;
     }
 
     .category {
@@ -197,11 +247,6 @@
 
     @media (max-width: 600px) {
       header h1 { font-size: 1.5rem; }
-      .refresh-btn {
-        position: static;
-        transform: none;
-        margin-top: 10px;
-      }
       .container { padding: 16px 10px 30px; }
       .news-item { padding: 12px 14px; }
     }
@@ -211,11 +256,26 @@
   <header>
     <h1>סיכום חדשות היום</h1>
     <div class="subtitle">כותרות עדכניות מ-Ynet</div>
-    <button class="refresh-btn" onclick="loadNews()" id="refreshBtn">רענון</button>
+    <div class="header-controls">
+      <span class="encoding-label">קידוד:</span>
+      <select id="encodingSelect" class="encoding-select" onchange="loadNews()">
+        <option value="auto">Auto-detect</option>
+        <option value="utf-8">UTF-8</option>
+        <option value="windows-1255">Windows-1255</option>
+        <option value="iso-8859-8">ISO-8859-8</option>
+        <option value="iso-8859-8-i">ISO-8859-8-I</option>
+        <option value="windows-1252">Windows-1252</option>
+        <option value="latin1">Latin-1</option>
+      </select>
+      <button class="header-btn" onclick="loadNews()" id="refreshBtn">רענון</button>
+      <button class="header-btn" onclick="loadDebug()" id="debugBtn">Debug</button>
+    </div>
   </header>
 
   <div class="container">
     <div id="timestamp" class="timestamp"></div>
+    <div id="encodingInfo" class="encoding-info"></div>
+    <div id="debugPanel" class="debug-panel" style="display:none"></div>
     <div id="content">
       <div class="loading">
         <div class="spinner"></div>
@@ -255,6 +315,7 @@
     function renderNews(data) {
       const content = document.getElementById("content");
       const timestamp = document.getElementById("timestamp");
+      const encodingInfo = document.getElementById("encodingInfo");
 
       if (data.fetchedAt) {
         const d = new Date(data.fetchedAt);
@@ -266,6 +327,10 @@
           hour: "2-digit",
           minute: "2-digit",
         });
+      }
+
+      if (data.encoding) {
+        encodingInfo.textContent = `Encoding: ${data.encoding}`;
       }
 
       let html = "";
@@ -284,11 +349,12 @@
 
       data.feeds.forEach((feed) => {
         const icon = CATEGORY_ICONS[feed.category] || "📌";
+        const strategyInfo = feed.strategy ? ` (${feed.strategy})` : "";
         html += `
           <div class="category">
             <div class="category-header">
               <span class="icon">${icon}</span>
-              ${feed.category}
+              ${feed.category}${strategyInfo}
             </div>
             <div class="news-list">`;
 
@@ -315,6 +381,7 @@
     async function loadNews() {
       const btn = document.getElementById("refreshBtn");
       const content = document.getElementById("content");
+      const encoding = document.getElementById("encodingSelect").value;
 
       btn.disabled = true;
       btn.textContent = "טוען...";
@@ -322,11 +389,11 @@
       content.innerHTML = `
         <div class="loading">
           <div class="spinner"></div>
-          <div class="loading-text">טוען חדשות...</div>
+          <div class="loading-text">טוען חדשות (${encoding})...</div>
         </div>`;
 
       try {
-        const res = await fetch("/api/news");
+        const res = await fetch(`/api/news?encoding=${encodeURIComponent(encoding)}`);
         const data = await res.json();
         renderNews(data);
       } catch (err) {
@@ -334,6 +401,42 @@
       } finally {
         btn.disabled = false;
         btn.textContent = "רענון";
+      }
+    }
+
+    async function loadDebug() {
+      const panel = document.getElementById("debugPanel");
+      const btn = document.getElementById("debugBtn");
+      btn.disabled = true;
+      btn.textContent = "Loading...";
+
+      try {
+        const res = await fetch("/api/debug");
+        const data = await res.json();
+        let text = `Feed: ${data.feedUrl}\n`;
+        text += `Strategy: ${data.strategy}\n`;
+        text += `Bytes: ${data.byteLength}\n`;
+        text += `First bytes (hex): ${data.firstBytes}\n\n`;
+
+        for (const [enc, info] of Object.entries(data.encodings)) {
+          text += `=== ${enc} ===\n`;
+          if (info.error) {
+            text += `  Error: ${info.error}\n`;
+          } else {
+            text += `  Hebrew chars: ${info.hebrewCount}\n`;
+            text += `  Sample: ${info.sample}\n`;
+          }
+          text += "\n";
+        }
+
+        panel.textContent = text;
+        panel.style.display = panel.style.display === "none" ? "block" : "none";
+      } catch (err) {
+        panel.textContent = `Error: ${err.message}`;
+        panel.style.display = "block";
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "Debug";
       }
     }
 

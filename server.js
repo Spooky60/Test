@@ -34,48 +34,42 @@ const RSS_FEEDS = [
   },
 ];
 
+// All supported encodings for manual selection
+const SUPPORTED_ENCODINGS = [
+  "auto",
+  "utf-8",
+  "windows-1255",
+  "iso-8859-8",
+  "iso-8859-8-i",
+  "windows-1252",
+  "latin1",
+];
+
 // Check if a string contains Hebrew characters (U+0590 - U+05FF)
 function containsHebrew(str) {
   let count = 0;
-  for (let i = 0; i < Math.min(str.length, 2000); i++) {
+  for (let i = 0; i < Math.min(str.length, 5000); i++) {
     const code = str.charCodeAt(i);
     if (code >= 0x0590 && code <= 0x05ff) count++;
   }
   return count;
 }
 
-// Decode raw RSS buffer to string, trying multiple encodings and
-// picking whichever produces the most valid Hebrew characters.
-function decodeRSSBuffer(buf, headers) {
-  // Try all candidate encodings
-  const candidates = ["utf-8", "windows-1255", "iso-8859-8"];
-  const results = [];
-
-  for (const enc of candidates) {
-    try {
-      const decoded = iconv.decode(buf, enc);
-      const hebrewCount = containsHebrew(decoded);
-      results.push({ encoding: enc, data: decoded, hebrewCount });
-      console.log(`  Encoding ${enc}: ${hebrewCount} Hebrew chars found`);
-    } catch {
-      // skip unsupported encoding
-    }
+// Decode buffer with a specific forced encoding
+function decodeWithEncoding(buf, encoding) {
+  let data;
+  try {
+    data = iconv.decode(buf, encoding);
+  } catch {
+    data = buf.toString("utf-8");
   }
 
-  // Pick the encoding that produced the most Hebrew characters
-  results.sort((a, b) => b.hebrewCount - a.hebrewCount);
-
-  let data = results.length > 0 ? results[0].data : buf.toString("utf-8");
-  const chosen = results.length > 0 ? results[0].encoding : "utf-8 (fallback)";
-  console.log(`  -> Chose encoding: ${chosen}`);
-
-  // Strip BOM if present
+  // Strip BOM
   if (data.charCodeAt(0) === 0xfeff) {
     data = data.slice(1);
   }
 
-  // Remove or fix the XML encoding declaration so xml2js doesn't
-  // try to re-decode the already-decoded string
+  // Fix XML encoding declaration
   data = data.replace(
     /(<\?xml[^?]*?)encoding=["'][^"']*["']/i,
     '$1encoding="UTF-8"'
@@ -84,134 +78,180 @@ function decodeRSSBuffer(buf, headers) {
   return data;
 }
 
-// Parse RSS XML string into news items
-function parseRSSItems(result) {
-  if (!result?.rss?.channel?.item) {
-    return [];
-  }
+// Auto-detect encoding by trying multiple and picking best
+function decodeRSSBufferAuto(buf) {
+  const candidates = ["utf-8", "windows-1255", "iso-8859-8", "iso-8859-8-i"];
+  let bestData = null;
+  let bestCount = -1;
+  let bestEnc = "utf-8";
 
-  const items = Array.isArray(result.rss.channel.item)
-    ? result.rss.channel.item
-    : [result.rss.channel.item];
-
-  return items.map((item) => ({
-    title: item.title || "",
-    description: (item.description || "").replace(/<[^>]*>/g, "").trim(),
-    link: item.link || "",
-    pubDate: item.pubDate || "",
-  }));
-}
-
-// Strategy 1: Fetch RSS directly from Ynet
-async function fetchRSSDirect(feedUrl) {
-  const response = await axios.get(feedUrl, {
-    responseType: "arraybuffer",
-    timeout: 10000,
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      Accept:
-        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      "Accept-Language": "he-IL,he;q=0.9,en;q=0.8",
-    },
-  });
-
-  const buf = Buffer.from(response.data);
-  const data = decodeRSSBuffer(buf, response.headers);
-
-  const parser = new xml2js.Parser({ explicitArray: false });
-  const result = await parser.parseStringPromise(data);
-  return parseRSSItems(result);
-}
-
-// Strategy 2: Use allorigins.win as a raw proxy (preserves original bytes)
-async function fetchRSSViaRawProxy(feedUrl) {
-  const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(feedUrl)}`;
-  const response = await axios.get(proxyUrl, {
-    responseType: "arraybuffer",
-    timeout: 15000,
-  });
-
-  const buf = Buffer.from(response.data);
-  const data = decodeRSSBuffer(buf, response.headers);
-
-  const parser = new xml2js.Parser({ explicitArray: false });
-  const result = await parser.parseStringPromise(data);
-  return parseRSSItems(result);
-}
-
-// Strategy 3: Use corsproxy.io as another raw proxy
-async function fetchRSSViaCorsProxy(feedUrl) {
-  const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(feedUrl)}`;
-  const response = await axios.get(proxyUrl, {
-    responseType: "arraybuffer",
-    timeout: 15000,
-  });
-
-  const buf = Buffer.from(response.data);
-  const data = decodeRSSBuffer(buf, response.headers);
-
-  const parser = new xml2js.Parser({ explicitArray: false });
-  const result = await parser.parseStringPromise(data);
-  return parseRSSItems(result);
-}
-
-// Try all strategies in order
-async function fetchRSS(feedUrl) {
-  const strategies = [
-    { name: "direct", fn: fetchRSSDirect },
-    { name: "allorigins", fn: fetchRSSViaRawProxy },
-    { name: "corsproxy", fn: fetchRSSViaCorsProxy },
-  ];
-
-  for (const strategy of strategies) {
+  for (const enc of candidates) {
     try {
-      const items = await strategy.fn(feedUrl);
-      if (items.length > 0) {
-        console.log(`[${strategy.name}] Success for ${feedUrl}: ${items.length} items`);
-        return items;
+      const decoded = decodeWithEncoding(buf, enc);
+      const count = containsHebrew(decoded);
+      console.log(`  Encoding ${enc}: ${count} Hebrew chars`);
+      if (count > bestCount) {
+        bestCount = count;
+        bestData = decoded;
+        bestEnc = enc;
       }
-    } catch (err) {
-      console.log(`[${strategy.name}] Failed for ${feedUrl}: ${err.message}`);
+    } catch {
+      // skip
     }
   }
 
-  console.error(`All strategies failed for ${feedUrl}`);
-  return [];
+  console.log(`  -> Auto-chose: ${bestEnc} (${bestCount} Hebrew chars)`);
+  return bestData || buf.toString("utf-8");
 }
 
-// API endpoint to get news
+// Fetch raw RSS bytes using multiple strategies
+async function fetchRSSRaw(feedUrl) {
+  const strategies = [
+    {
+      name: "direct",
+      url: feedUrl,
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        Accept: "application/xml,text/xml,*/*;q=0.8",
+        "Accept-Language": "he-IL,he;q=0.9,en;q=0.8",
+      },
+    },
+    {
+      name: "allorigins",
+      url: `https://api.allorigins.win/raw?url=${encodeURIComponent(feedUrl)}`,
+    },
+    {
+      name: "corsproxy",
+      url: `https://corsproxy.io/?${encodeURIComponent(feedUrl)}`,
+    },
+  ];
+
+  for (const s of strategies) {
+    try {
+      const response = await axios.get(s.url, {
+        responseType: "arraybuffer",
+        timeout: 12000,
+        headers: s.headers || {},
+      });
+      const buf = Buffer.from(response.data);
+      if (buf.length > 100) {
+        console.log(`[${s.name}] Got ${buf.length} bytes for ${feedUrl}`);
+        return { buf, strategy: s.name };
+      }
+    } catch (err) {
+      console.log(`[${s.name}] Failed: ${err.message}`);
+    }
+  }
+
+  throw new Error("All fetch strategies failed");
+}
+
+// Parse RSS XML string into items
+function parseRSSItems(xmlString) {
+  const parser = new xml2js.Parser({ explicitArray: false });
+  return parser.parseStringPromise(xmlString).then((result) => {
+    if (!result?.rss?.channel?.item) return [];
+
+    const items = Array.isArray(result.rss.channel.item)
+      ? result.rss.channel.item
+      : [result.rss.channel.item];
+
+    return items.map((item) => ({
+      title: item.title || "",
+      description: (item.description || "").replace(/<[^>]*>/g, "").trim(),
+      link: item.link || "",
+      pubDate: item.pubDate || "",
+    }));
+  });
+}
+
+// API endpoint to get news with optional encoding override
 app.get("/api/news", async (req, res) => {
   res.set("Content-Type", "application/json; charset=utf-8");
+
+  const forcedEncoding = req.query.encoding || "auto";
+  console.log(`\n=== Fetching news (encoding: ${forcedEncoding}) ===`);
+
   try {
     const feedPromises = RSS_FEEDS.map(async (feed) => {
-      const items = await fetchRSS(feed.url);
-      return { category: feed.name, items: items.slice(0, 10) };
+      try {
+        const { buf, strategy } = await fetchRSSRaw(feed.url);
+
+        let xmlString;
+        if (forcedEncoding === "auto") {
+          xmlString = decodeRSSBufferAuto(buf);
+        } else {
+          xmlString = decodeWithEncoding(buf, forcedEncoding);
+          const hCount = containsHebrew(xmlString);
+          console.log(`  Forced ${forcedEncoding}: ${hCount} Hebrew chars`);
+        }
+
+        const items = await parseRSSItems(xmlString);
+        return { category: feed.name, items: items.slice(0, 10), strategy };
+      } catch (err) {
+        console.log(`Feed ${feed.name} failed: ${err.message}`);
+        return { category: feed.name, items: [] };
+      }
     });
 
     const results = await Promise.all(feedPromises);
-
-    // Filter out empty feeds
     const feeds = results.filter((r) => r.items.length > 0);
 
     if (feeds.length === 0) {
       return res.json({
         feeds: [],
+        encoding: forcedEncoding,
         fetchedAt: new Date().toISOString(),
-        error:
-          "לא ניתן לגשת לפיד RSS של Ynet כרגע. נסו שוב מאוחר יותר.",
+        error: "לא ניתן לגשת לפיד RSS של Ynet כרגע. נסו שוב מאוחר יותר.",
       });
     }
 
     res.json({
       feeds,
+      encoding: forcedEncoding,
       fetchedAt: new Date().toISOString(),
     });
   } catch (err) {
     console.error("Error in /api/news:", err.message);
-    res.status(500).json({
-      error: "שגיאה בטעינת החדשות",
-    });
+    res.status(500).json({ error: "שגיאה בטעינת החדשות" });
+  }
+});
+
+// Debug endpoint: show raw bytes info for the first feed
+app.get("/api/debug", async (req, res) => {
+  res.set("Content-Type", "application/json; charset=utf-8");
+  const feedUrl = RSS_FEEDS[0].url;
+
+  try {
+    const { buf, strategy } = await fetchRSSRaw(feedUrl);
+
+    const debugInfo = {
+      feedUrl,
+      strategy,
+      byteLength: buf.length,
+      firstBytes: Array.from(buf.slice(0, 50)).map((b) => b.toString(16).padStart(2, "0")).join(" "),
+      encodings: {},
+    };
+
+    for (const enc of ["utf-8", "windows-1255", "iso-8859-8", "iso-8859-8-i", "latin1"]) {
+      try {
+        const decoded = iconv.decode(buf, enc);
+        const hebrewCount = containsHebrew(decoded);
+        // Show first 200 chars of the decoded content (after XML header)
+        const contentStart = decoded.indexOf("<title>");
+        const sample = contentStart >= 0
+          ? decoded.substring(contentStart, contentStart + 200)
+          : decoded.substring(0, 200);
+        debugInfo.encodings[enc] = { hebrewCount, sample };
+      } catch {
+        debugInfo.encodings[enc] = { error: "decode failed" };
+      }
+    }
+
+    res.json(debugInfo);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 

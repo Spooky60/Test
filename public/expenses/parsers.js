@@ -116,9 +116,11 @@
     origAmount: ["סכום עסקה", "סכום העסקה", "סכום עסקה מקורי", "original amount", "transaction amount", "foreign amount"],
     card: ["4 ספרות אחרונות של כרטיס האשראי", "4 ספרות אחרונות", "card number", "card", "כרטיס", "account"],
     credit: ["credit", "credits", "זיכוי"],
+    chargeCurrency: ["מטבע חיוב", "billing currency", "charge currency"],
     currency: ["מטבע עסקה", "מטבע מקור", "currency", "מטבע"],
     hint: ["קטגוריה", "ענף", "category", "sector", "type of business"],
-    notes: ["פירוט נוסף", "הערות", "סוג עסקה", "notes", "memo", "type", "פירוט"],
+    notes: ["פירוט נוסף", "הערות", "notes", "memo", "פירוט"],
+    type: ["סוג עסקה", "סוג העסקה", "transaction type", "type"],
   };
 
   function normHeader(v) {
@@ -154,6 +156,7 @@
     const samples = [];
     for (const r of rows) for (const c of r) if (typeof c === "string" && /^\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}/.test(c.trim())) samples.push(c.trim());
     const order = guessDateOrder(samples, ctx.hebrew);
+    ctx.statementDate = ctx.hebrew ? findStatementDate(rows.slice(0, 40).map((r) => r.join(" ")).join("\n"), order, ctx.year) : null;
 
     for (const row of rows) {
       if (!row || !row.some((c) => c !== "" && c != null)) continue;
@@ -171,26 +174,38 @@
         const orig = parseAmount(get("origAmount"));
         if (orig) amount = orig; else continue;
       }
-      let notes = String(get("notes") ?? "").trim();
-      if (/^(sale|purchase|debit|credit|regular|רגילה|עסקה רגילה|רכישה)$/i.test(notes)) notes = "";
+      const plain = /^(sale|purchase|debit|credit|regular|רגילה|עסקה רגילה|רכישה|תשלומים)$/i;
+      let notes = [get("type"), get("notes")].map((v) => String(v ?? "").trim()).filter((v) => v && !plain.test(v)).join(" · ");
+      const installment = parseInstallment(notes) || parseInstallment(desc);
+      const billed = parseDate(get("postDate"), order, ctx.year) || ctx.statementDate;
       const origAmount = parseAmount(get("origAmount"));
       const origCurrency = currencyCode(get("currency"));
       const cardCell = String(get("card") ?? "").match(/\d{4}/);
+      const chargeCurrency = currencyCode(get("chargeCurrency"));
       out.push({
-        date, description: desc, amount,
+        date, billed, description: desc, amount,
         origAmount: origAmount != null && origCurrency && origCurrency !== ctx.currency ? origAmount : null,
         origCurrency: origCurrency && origCurrency !== ctx.currency ? origCurrency : null,
+        chargeCurrency: chargeCurrency && chargeCurrency !== ctx.currency ? chargeCurrency : null,
+        abroad: (origCurrency && origCurrency !== ctx.currency) || (chargeCurrency && chargeCurrency !== ctx.currency) || undefined,
         hint: String(get("hint") ?? "").trim() || null,
         notes: notes || null,
-        installment: parseInstallment(notes) || parseInstallment(desc),
+        installment,
         card: cardCell ? cardCell[0] : ctx.card,
       });
     }
     return out;
   }
 
+  /** Billing/statement date printed on the statement, e.g. "לתאריך 02/09/26" or "מועד חיוב: 02/10/2026". */
+  function findStatementDate(text, order, year) {
+    const m = text.match(/(?:לתאריך|מועד חיוב|תאריך חיוב|payment due date|statement date|closing date)[^\d\n]{0,12}(\d{1,2}[/.\-]\d{1,2}[/.\-]\d{2,4})/i);
+    return m ? parseDate(m[1], order, year) : null;
+  }
+
   function findCard(text) {
-    const m = text.match(/(?:card|כרטיס|ending|מסתיים|account)[^\d\n]{0,40}(\d{4})(?!\d)/i);
+    const m = text.match(/(?:שמסתיים|המסתיים|מסתיים|ending in|ending|ends in)[^\d\n]{0,12}(\d{4})(?!\d)/i) ||
+      text.match(/(?:card|כרטיס)(?![^\n]{0,15}(?:אובדן|גניבת|lost|stolen))[^\d\n]{0,40}(\d{4})(?!\d)/i);
     return m ? m[1] : null;
   }
 
@@ -233,7 +248,12 @@
     ].join("|"),
     "gi"
   );
-  const AMOUNT_RE = /\(?-?\s?[₪$€£]?\s?-?\d{1,3}(?:,\d{3})*[.,]\d{2}\)?-?(?:\s?CR\b)?|\(?-?\s?[₪$€£]?\s?-?\d+[.,]\d{2}\)?-?(?:\s?CR\b)?/g;
+  const AMOUNT_RE = /\(?-?\s?[₪$€£]?\s?-?(?:\d{1,3}(?:,\d{3})+|\d+)[.,]\d{2}(?![\d%])\)?-?(?:\s?CR\b)?/g;
+
+  // Transaction-type words that sit in their own column on Israeli statements.
+  const TYPE_WORDS = /(?:^|\s)(רגילה|תשלומים|קרדיט|חיוב נדחה|חיוב חודשי|דחוי חודש|עסקת חו"ל|מיידי|regular)(?=\s|$)/g;
+  const STANDING_ORDER = /הוראת\s*קבע|standing order/i;
+  const WALLET = /\b(APPLE\s*\/?\s*GOOGLE\s*PAY|APPLE\s*PAY|GOOGLE\s*PAY|PAYPAL\s*\*?)\b/i;
 
   async function pdfLines(file) {
     const data = new Uint8Array(await file.arrayBuffer());
@@ -248,13 +268,26 @@
         const y = it.transform[5], x = it.transform[4];
         let row = rows.find((r) => Math.abs(r.y - y) < 3);
         if (!row) rows.push((row = { y, items: [] }));
-        row.items.push({ x, str: it.str });
+        row.items.push({ x, w: it.width || 0, h: Math.abs(it.transform[3]) || 8, str: it.str.trim() });
       }
       rows.sort((a, b) => b.y - a.y);
       for (const r of rows) {
         const rtl = r.items.some((i) => HEBREW.test(i.str));
         r.items.sort((a, b) => (rtl ? b.x - a.x : a.x - b.x));
-        lines.push(r.items.map((i) => i.str.trim()).join("  "));
+        // Words close together belong to the same cell (single space); a wide
+        // gap means a new column (double space), which keeps merchant names whole.
+        let out = "";
+        r.items.forEach((it, i) => {
+          let str = it.str;
+          if (rtl && (str === "(" || str === ")")) str = str === "(" ? ")" : "("; // mirrored brackets in RTL text
+          if (i > 0) {
+            const prev = r.items[i - 1];
+            const gap = rtl ? prev.x - (it.x + it.w) : it.x - (prev.x + prev.w);
+            out += gap > Math.max(6, it.h * 0.9) ? "  " : " ";
+          }
+          out += str;
+        });
+        lines.push(out);
       }
     }
     return lines;
@@ -270,39 +303,65 @@
     const samples = [];
     for (const l of lines) for (const m of l.matchAll(DATE_RE)) samples.push(m[0]);
     const order = guessDateOrder(samples, hebrew);
+    // Billing date: lets the app group a statement into its billing month.
+    const statementDate = findStatementDate(text, order, year);
 
     const out = [];
+    let abroad = false;
     for (const line of lines) {
       const dates = [...line.matchAll(DATE_RE)];
+      const amountsRaw = [...line.replace(DATE_RE, " ").matchAll(AMOUNT_RE)];
+      // Section headers ("עסקות בחו"ל" / "עסקות בארץ") switch the abroad flag.
+      if (!amountsRaw.length) {
+        if (/בחו["״]ל|במטבע זר|foreign transactions/i.test(line)) abroad = true;
+        else if (/בארץ|domestic/i.test(line)) abroad = false;
+      }
       if (!dates.length) continue;
       const date = parseDate(dates[0][0], order, year);
       if (!date) continue;
       let rest = line.replace(DATE_RE, " ");
-      const amounts = [...rest.matchAll(AMOUNT_RE)].map((m) => m[0]);
+      const amounts = [...rest.matchAll(AMOUNT_RE)];
       if (!amounts.length) continue;
-      const amount = parseAmount(amounts[amounts.length - 1]);
+      const last = amounts[amounts.length - 1];
+      const amount = parseAmount(last[0]);
       if (amount == null || amount === 0) continue;
-      const origAmount = amounts.length > 1 ? parseAmount(amounts[0]) : null;
+      const near = (m) => (m[0] + " " + rest.slice(m.index + m[0].length, m.index + m[0].length + 3) + rest.slice(Math.max(0, m.index - 3), m.index));
+      const chargeCurrency = currencyCode((near(last).match(/[$€£₪]/) || [])[0]) || currency;
+      const first = amounts[0];
+      const firstCurrency = currencyCode((near(first).match(/[$€£₪]/) || [])[0]);
+      const origAmount = amounts.length > 1 ? parseAmount(first[0]) : null;
       rest = rest.replace(AMOUNT_RE, " ");
+      if (SKIP_ROW.test(rest.replace(/^[\s\d.:*]+/, ""))) continue;
       const installment = parseInstallment(rest);
+      const notes = [];
+      if (STANDING_ORDER.test(rest)) notes.push("הוראת קבע");
+      const wallet = rest.match(WALLET);
+      if (wallet) notes.push(wallet[1].trim());
+      const types = [...rest.matchAll(TYPE_WORDS)].map((m) => m[1]).filter((w) => w !== "רגילה" && w !== "regular");
       let desc = rest
         .replace(/תשלום\s*\d+\s*מתוך\s*\d+|\d+\s*מתוך\s*\d+/g, " ")
-        .replace(/\b(USD|EUR|GBP|ILS|NIS)\b|[₪$€£]|ש"ח/g, " ")
-        .replace(/\s{2,}/g, "  ")
+        .replace(STANDING_ORDER, "  ")
+        .replace(WALLET, "  ")
+        .replace(TYPE_WORDS, "  ")
+        .replace(/\b(USD|EUR|GBP|ILS|NIS)\b|[₪$€£]|ש"ח/g, "  ")
         .trim();
-      // keep the longest text chunk as the merchant; others become notes
-      const chunks = desc.split(/\s{2,}/).filter((c) => /[\p{L}]/u.test(c));
+      // Several text cells may remain (e.g. city + merchant on foreign rows):
+      // the longest one is the merchant, the rest become notes.
+      const chunks = desc.split(/\s{2,}/).map((c) => c.trim()).filter((c) => /[\p{L}]{2}/u.test(c));
       if (!chunks.length) continue;
-      chunks.sort((a, b) => b.length - a.length);
-      desc = chunks[0].trim();
+      const ranked = [...chunks].sort((a, b) => b.length - a.length);
+      desc = ranked[0].replace(/^[\s\-–·.,/]+|[\s\-–·,/]+$/g, "");
       if (SKIP_ROW.test(desc) || desc.length < 2) continue;
-      const lineCur = currencyCode((line.match(/\b(USD|EUR|GBP)\b|[$€£]/) || [])[0]);
+      notes.push(...chunks.filter((c) => c !== ranked[0]));
+      if (types.length) notes.push(...types.filter((t) => t !== "תשלומים" || !installment));
       out.push({
-        date, description: desc, amount,
-        origAmount: lineCur && lineCur !== currency && origAmount != null ? origAmount : null,
-        origCurrency: lineCur && lineCur !== currency ? lineCur : null,
+        date, billed: statementDate, description: desc, amount,
+        chargeCurrency: chargeCurrency !== currency ? chargeCurrency : null,
+        origAmount: firstCurrency && firstCurrency !== currency && firstCurrency !== chargeCurrency && origAmount != null ? origAmount : null,
+        origCurrency: firstCurrency && firstCurrency !== currency && firstCurrency !== chargeCurrency ? firstCurrency : null,
+        abroad: abroad || (chargeCurrency !== currency) || undefined,
         hint: null,
-        notes: chunks.slice(1).join(" · ") || null,
+        notes: notes.join(" · ") || null,
         installment,
         card,
       });

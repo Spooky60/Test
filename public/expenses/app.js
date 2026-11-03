@@ -7,7 +7,13 @@
 
   // ---------- state & persistence ----------
 
-  let state = { transactions: [], rules: [], imports: [], currency: null };
+  let state = { transactions: [], rules: [], imports: [], currency: null, fx: {} };
+  // Approximate defaults for charges billed in another currency (e.g. a USD
+  // sub-account on an Israeli card); editable in the Imports tab.
+  const DEFAULT_FX = { ILS: { USD: 3.5, EUR: 4.0, GBP: 4.6 } };
+  function fxRate(cur) {
+    return state.fx?.[cur] ?? DEFAULT_FX[state.currency]?.[cur] ?? 1;
+  }
   const ui = { tab: "overview", period: "all", card: "all", search: "", catFilter: "all", sort: { key: "date", dir: -1 }, openCats: new Set() };
 
   function load() {
@@ -79,8 +85,17 @@
     t.category = t.manualCategory || categorize(t, state.rules);
   }
   function recategorizeAll() { state.transactions.forEach(applyCategory); }
+  function applyFx(t) {
+    if (t.chargeCurrency && t.chargeAmount != null) t.amount = Math.round(t.chargeAmount * fxRate(t.chargeCurrency) * 100) / 100;
+  }
+  const isForeign = (t) => !!(t.abroad || t.origCurrency || t.chargeCurrency);
+  function foreignTag(t) {
+    if (t.chargeCurrency) return moneyIn(t.chargeAmount, t.chargeCurrency);
+    if (t.origCurrency) return moneyIn(t.origAmount, t.origCurrency);
+    return t.abroad ? "abroad" : "";
+  }
 
-  const dedupeKey = (t) => [t.date, t.description.toLowerCase(), t.amount.toFixed(2), t.card || ""].join("|");
+  const dedupeKey = (t) => [t.date, t.description.toLowerCase(), (t.chargeAmount ?? t.amount).toFixed(2), t.card || ""].join("|");
 
   function addTransactions(raw, source) {
     // Count-based de-duplication: re-importing the same statement adds nothing,
@@ -91,6 +106,7 @@
     let added = 0, skipped = 0;
     for (const r of raw) {
       const t = { id: uid(), source, ...r, amount: Math.round(r.amount * 100) / 100 };
+      if (t.chargeCurrency) { t.chargeAmount = t.amount; applyFx(t); }
       const k = dedupeKey(t);
       seen[k] = (seen[k] || 0) + 1;
       if (seen[k] <= (existing[k] || 0)) { skipped++; continue; }
@@ -135,8 +151,8 @@
   // ---------- derived data ----------
 
   function scoped() { return state.transactions.filter((t) => ui.card === "all" || (t.card || "—") === ui.card); }
-  function inPeriod(list, period) { return period === "all" ? list : list.filter((t) => monthOf(t.date) === period); }
-  function allMonths() { return [...new Set(state.transactions.map((t) => monthOf(t.date)))].sort().reverse(); }
+  function inPeriod(list, period) { return period === "all" ? list : list.filter((t) => monthOf(t.billed || t.date) === period); }
+  function allMonths() { return [...new Set(state.transactions.map((t) => monthOf(t.billed || t.date)))].sort().reverse(); }
 
   const BILL_LIKE = new Set(["subscriptions", "utilities", "fitness", "insurance", "education", "kids", "fees"]);
 
@@ -145,7 +161,7 @@
     const byM = groupBy(list.filter((t) => t.amount > 0 && !t.installment && !isExcluded(t)), (t) => t.merchant);
     const out = [];
     for (const [key, txs] of byM) {
-      const months = new Set(txs.map((t) => monthOf(t.date)));
+      const months = new Set(txs.map((t) => monthOf(t.billed || t.date)));
       if (months.size < 2 || txs.length > months.size * 1.5) continue;
       const amts = txs.map((t) => t.amount);
       const med = median(amts);
@@ -221,7 +237,7 @@
   function renderOverview() {
     const all = scoped();
     const cur = inPeriod(all, ui.period);
-    const months = [...new Set(all.map((t) => monthOf(t.date)))].sort();
+    const months = [...new Set(all.map((t) => monthOf(t.billed || t.date)))].sort();
     const isMonth = ui.period !== "all";
     const prevList = isMonth ? inPeriod(all, prevMonth(ui.period)) : [];
     const spend = spendOf(cur);
@@ -232,7 +248,7 @@
       : Math.max(1, (new Date(cur.reduce((a, t) => (t.date > a ? t.date : a), "0")) - new Date(cur.reduce((a, t) => (t.date < a ? t.date : a), "9"))) / 864e5 + 1);
     const recurring = findRecurring(all);
     const recurringTotal = sum(recurring, (r) => r.monthly);
-    const installments = findInstallments(isMonth ? all.filter((t) => monthOf(t.date) <= ui.period) : all).filter((p) => p.left > 0);
+    const installments = findInstallments(isMonth ? all.filter((t) => monthOf(t.billed || t.date) <= ui.period) : all).filter((p) => p.left > 0);
     const cats = categoryTotals(cur);
     const prevCats = Object.fromEntries(categoryTotals(prevList).map((c) => [c.id, c.total]));
 
@@ -249,8 +265,11 @@
     if (cats[0]) ins.push([cats[0].cat.icon, `<b>${esc(cats[0].cat.name)}</b> is your largest category: ${((cats[0].total / spend) * 100).toFixed(0)}% of spending (${cats[0].txs.length} transactions).`]);
     if (recurring.length) ins.push(["🔁", `<b>${recurring.length} recurring charges</b> add up to about ${money(recurringTotal, { whole: true })}/month — see the list below to spot ones you no longer use.`]);
     if (installments.length) ins.push(["🧾", `<b>${installments.length} installment plan${installments.length > 1 ? "s" : ""}</b> still running, with ${money(sum(installments, (p) => p.remaining), { whole: true })} left to pay.`]);
-    const foreign = cur.filter((t) => t.origCurrency);
-    if (foreign.length) ins.push(["🌍", `${foreign.length} purchase${foreign.length > 1 ? "s" : ""} in foreign currency (${[...new Set(foreign.map((t) => t.origCurrency))].join(", ")}) totalling ${money(sum(foreign), { whole: true })} — watch for conversion fees.`]);
+    const foreign = cur.filter(isForeign);
+    if (foreign.length) {
+      const curs = [...new Set(foreign.map((t) => t.chargeCurrency || t.origCurrency).filter(Boolean))];
+      ins.push(["🌍", `${foreign.length} purchase${foreign.length > 1 ? "s" : ""} from abroad${curs.length ? ` (incl. ${curs.join(", ")})` : ""} totalling ${money(sum(foreign), { whole: true })} — watch for conversion fees.`]);
+    }
     if (refunds > 0) ins.push(["↩️", `Refunds and credits gave back <b>${money(refunds, { whole: true })}</b>.`]);
     const uncategorized = cur.filter((t) => t.category === "other");
     if (uncategorized.length) ins.push(["🏷️", `${uncategorized.length} transaction${uncategorized.length > 1 ? "s are" : " is"} uncategorized (${money(sum(uncategorized), { whole: true })}). <button class="link" data-goto="other">Review them</button> — your choice is remembered for that merchant.`]);
@@ -289,7 +308,7 @@
       </div>
 
       <div class="card" style="margin-top:16px">
-        <div class="section-head"><h2>Monthly trend</h2><span class="muted small">click a month to focus on it</span></div>
+        <div class="section-head"><h2>Monthly trend</h2><span class="muted small">${all.some((t) => t.billed) ? "by billing month · " : ""}click a month to focus on it</span></div>
         ${monthChart(all, months)}
       </div>
 
@@ -352,7 +371,7 @@
     const cur = inPeriod(all, ui.period);
     const isMonth = ui.period !== "all";
     const prevCats = isMonth ? Object.fromEntries(categoryTotals(inPeriod(all, prevMonth(ui.period))).map((c) => [c.id, c.total])) : {};
-    const nMonths = new Set(all.map((t) => monthOf(t.date))).size || 1;
+    const nMonths = new Set(all.map((t) => monthOf(t.billed || t.date))).size || 1;
     const spend = spendOf(cur);
     const recurringKeys = new Map(findRecurring(all).map((r) => [r.merchant, r]));
     const excluded = cur.filter(isExcluded);
@@ -393,8 +412,9 @@
     if (rec) tags.push(`<span class="tag">recurring · ${money(rec.monthly)}/mo</span>`);
     const inst = m.txs.find((t) => t.installment);
     if (inst) tags.push(`<span class="tag warn">installments ${inst.installment.n}/${inst.installment.of}</span>`);
-    const foreign = [...new Set(m.txs.map((t) => t.origCurrency).filter(Boolean))];
+    const foreign = [...new Set(m.txs.map((t) => t.chargeCurrency || t.origCurrency).filter(Boolean))];
     if (foreign.length) tags.push(`<span class="tag">${foreign.join(", ")}</span>`);
+    else if (m.txs.some((t) => t.abroad)) tags.push(`<span class="tag">abroad</span>`);
     if (m.txs.some((t) => t.amount < 0)) tags.push(`<span class="tag green">refund</span>`);
     return `
       <details class="merchant">
@@ -403,7 +423,7 @@
         <div class="table-wrap"><table><tbody>${m.txs.map((t) => `
           <tr><td class="num muted">${fmtDate(t.date)}</td>
           <td class="desc"><div class="d" dir="auto">${esc(t.description)}</div>${t.notes ? `<div class="muted small" dir="auto">${esc(t.notes)}</div>` : ""}</td>
-          <td class="muted small">${t.origCurrency ? moneyIn(t.origAmount, t.origCurrency) : ""}</td>
+          <td class="muted small">${foreignTag(t)}</td>
           <td class="num ${t.amount < 0 ? "neg" : ""}" style="text-align:right">${money(t.amount)}</td></tr>`).join("")}</tbody></table></div>
       </details>`;
   }
@@ -445,7 +465,7 @@
               <td class="num muted">${fmtDate(t.date)}</td>
               <td class="desc"><div class="d" dir="auto" title="${esc(t.description)}">${esc(t.description)}
                 ${t.installment ? `<span class="tag warn">${t.installment.n}/${t.installment.of}</span>` : ""}
-                ${t.origCurrency ? `<span class="tag">${moneyIn(t.origAmount, t.origCurrency)}</span>` : ""}</div>
+                ${isForeign(t) ? `<span class="tag">${foreignTag(t)}</span>` : ""}</div>
                 ${t.notes ? `<div class="muted small" dir="auto">${esc(t.notes)}</div>` : ""}</td>
               <td class="muted small">${t.card ? "•••• " + esc(t.card) : ""}</td>
               <td><select data-cat-for="${t.id}">${categoryOptions(t.category)}</select></td>
@@ -496,10 +516,24 @@
               <td><button class="btn danger sm" data-del-import="${i}">Remove</button></td></tr>`;
           }).join("")}</tbody>
         </table></div>
+        ${fxEditor()}
         <div style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap">
           <button class="btn danger" id="clearAll" type="button">Delete all data</button>
         </div>
       </div>`;
+  }
+
+  function fxEditor() {
+    const curs = [...new Set(state.transactions.map((t) => t.chargeCurrency).filter(Boolean))];
+    if (!curs.length) return "";
+    return `
+      <h3 style="margin-top:20px">Exchange rates</h3>
+      <p class="muted small">Some charges were billed in another currency (for example a dollar sub-account). They are converted to
+        ${esc(state.currency)} with these rates — set them to what your statement or bank used.</p>
+      <div class="toolbar">${curs.map((c) => `
+        <label class="field"><span>1 ${esc(c)} =</span>
+          <input type="number" step="0.0001" min="0" data-fx="${esc(c)}" value="${fxRate(c)}" style="width:110px" /></label>`).join("")}
+        <span class="muted small">${esc(state.currency)}</span></div>`;
   }
 
   // ---------- events ----------
@@ -520,7 +554,7 @@
   function exportCsv() {
     const rows = [["Date", "Description", "Category", "Amount", "Currency", "Original amount", "Original currency", "Installment", "Card", "Notes", "Source"]];
     for (const t of [...inPeriod(scoped(), ui.period)].sort((a, b) => a.date.localeCompare(b.date))) {
-      rows.push([t.date, t.description, BY_ID[t.category].name, t.amount, state.currency, t.origAmount ?? "", t.origCurrency ?? "",
+      rows.push([t.date, t.description, BY_ID[t.category].name, t.amount, state.currency, t.chargeAmount ?? t.origAmount ?? "", t.chargeCurrency ?? t.origCurrency ?? "",
         t.installment ? `${t.installment.n}/${t.installment.of}` : "", t.card ?? "", t.notes ?? "", t.source]);
     }
     const csv = "﻿" + rows.map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
@@ -542,7 +576,7 @@
 
     $("#periodSelect").onchange = (e) => { ui.period = e.target.value; render(); };
     $("#cardSelect").onchange = (e) => { ui.card = e.target.value; render(); };
-    $("#currencySelect").onchange = (e) => { state.currency = e.target.value; save(); render(); };
+    $("#currencySelect").onchange = (e) => { state.currency = e.target.value; state.transactions.forEach(applyFx); save(); render(); };
     document.querySelectorAll(".tab").forEach((b) => (b.onclick = () => { ui.tab = b.dataset.tab; render(); }));
     $("#demoBtn").onclick = loadDemo;
 
@@ -586,11 +620,17 @@
       else if (el.id === "exportBtn") exportCsv();
       else if (el.id === "clearAll") {
         if (!confirm("Delete all transactions, rules and imports from this browser?")) return;
-        state = { transactions: [], rules: [], imports: [], currency: null }; save(); ui.period = "all"; render();
+        state = { transactions: [], rules: [], imports: [], currency: null, fx: {} }; save(); ui.period = "all"; render();
       }
     });
     document.addEventListener("change", (e) => {
       if (e.target.dataset.catFor) setCategory(e.target.dataset.catFor, e.target.value);
+      else if (e.target.dataset.fx) {
+        const v = parseFloat(e.target.value);
+        if (!(v > 0)) return;
+        state.fx = { ...(state.fx || {}), [e.target.dataset.fx]: v };
+        state.transactions.forEach(applyFx); save(); render(); toast(`Rate updated: 1 ${e.target.dataset.fx} = ${v} ${state.currency}`);
+      }
       else if (e.target.id === "txCat") { ui.catFilter = e.target.value; render(); }
     });
     document.addEventListener("input", (e) => { if (e.target.id === "txSearch") { ui.search = e.target.value; renderTransactions(); } });

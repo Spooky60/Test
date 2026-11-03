@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Expense Tracker</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Heebo:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">₪$</span>
+      <div>
+        <h1>Expense Tracker</h1>
+        <p class="muted small">Your statements are processed locally in this browser — nothing is uploaded.</p>
+      </div>
+    </div>
+    <div class="controls">
+      <label class="field">
+        <span>Period</span>
+        <select id="periodSelect"></select>
+      </label>
+      <label class="field">
+        <span>Card</span>
+        <select id="cardSelect"></select>
+      </label>
+      <label class="field">
+        <span>Currency</span>
+        <select id="currencySelect">
+          <option value="ILS">₪ ILS</option>
+          <option value="USD">$ USD</option>
+          <option value="EUR">€ EUR</option>
+          <option value="GBP">£ GBP</option>
+        </select>
+      </label>
+    </div>
+  </header>
+
+  <main>
+    <section id="dropzone" class="dropzone" tabindex="0">
+      <input type="file" id="fileInput" accept=".pdf,.xlsx,.xls,.csv" multiple hidden />
+      <div class="drop-inner">
+        <div class="drop-icon">📄</div>
+        <div>
+          <strong>Drop credit card statements here</strong> or <button class="link" id="browseBtn" type="button">browse</button>
+          <div class="muted small">PDF, XLSX, XLS or CSV · multiple files at once · re-importing the same file won't duplicate</div>
+        </div>
+        <button class="btn ghost" id="addManualBtn" type="button">+ Add expense manually</button>
+      </div>
+      <div id="importStatus" class="import-status"></div>
+    </section>
+
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-tab="overview">Overview</button>
+      <button class="tab" data-tab="categories">Categories</button>
+      <button class="tab" data-tab="transactions">Transactions</button>
+      <button class="tab" data-tab="rules">Rules</button>
+      <button class="tab" data-tab="imports">Imports</button>
+    </nav>
+
+    <div id="empty" class="empty card">
+      <h2>No expenses yet</h2>
+      <p class="muted">Upload a statement export from your credit card (Excel or PDF). The app finds the transactions,
+        sorts them into categories, and spots subscriptions, installment plans, refunds and foreign purchases.</p>
+      <button class="btn" id="demoBtn" type="button">Load sample data</button>
+    </div>
+
+    <section id="tab-overview" class="tab-panel"></section>
+    <section id="tab-categories" class="tab-panel" hidden></section>
+    <section id="tab-transactions" class="tab-panel" hidden></section>
+    <section id="tab-rules" class="tab-panel" hidden></section>
+    <section id="tab-imports" class="tab-panel" hidden></section>
+  </main>
+
+  <dialog id="manualDialog">
+    <form method="dialog" id="manualForm" class="dialog-form">
+      <h3>Add expense</h3>
+      <label class="field"><span>Date</span><input type="date" name="date" required /></label>
+      <label class="field"><span>Description</span><input type="text" name="description" required placeholder="e.g. Corner bakery" /></label>
+      <label class="field"><span>Amount</span><input type="number" name="amount" step="0.01" required placeholder="Negative for refunds" /></label>
+      <label class="field"><span>Category</span><select name="category"></select></label>
+      <div class="dialog-actions">
+        <button class="btn ghost" value="cancel" formnovalidate>Cancel</button>
+        <button class="btn" value="save">Add</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script>
+    if (window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc =
+      "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  </script>
+  <script src="categories.js"></script>
+  <script src="parsers.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
